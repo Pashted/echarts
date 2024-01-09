@@ -23861,7 +23861,7 @@
         var colorCallback = isFunction(color) ? color : null;
         var hasAutoColor = globalStyle.fill === 'auto' || globalStyle.stroke === 'auto'; // Get from color palette by default.
 
-        if (!globalStyle[colorKey] || colorCallback || hasAutoColor) {
+        if (!globalStyle[colorKey] || colorCallback && seriesModel.isColorBySeries() || hasAutoColor) {
           // Note: If some series has color specified (e.g., by itemStyle.color), we DO NOT
           // make it effect palette. Because some scenarios users need to make some series
           // transparent or as background, which should better not effect the palette.
@@ -23882,9 +23882,26 @@
 
         if (!ecModel.isSeriesFiltered(seriesModel) && colorCallback) {
           data.setVisual('colorFromPalette', false);
+          var defaultDataColor_1 = {};
+
+          if (!seriesModel.isColorBySeries() && colorKey === 'fill') {
+            var colorScope_1 = inner$3(seriesModel).scope;
+            var dataAll_1 = seriesModel.getRawData();
+            dataAll_1.each(function (rawIdx) {
+              var name = dataAll_1.getName(rawIdx) || rawIdx + '';
+              defaultDataColor_1[rawIdx] = seriesModel.getColorFromPalette(name, colorScope_1, dataAll_1.count());
+            });
+          }
+
           return {
             dataEach: function (data, idx) {
               var dataParams = seriesModel.getDataParams(idx);
+              var rawIdx = data.getRawIndex(idx);
+
+              if (defaultDataColor_1[rawIdx]) {
+                dataParams.color = defaultDataColor_1[rawIdx];
+              }
+
               var itemStyle = extend({}, globalStyle);
               itemStyle[colorKey] = colorCallback(dataParams);
               data.setItemVisual(idx, 'style', itemStyle);
@@ -41529,6 +41546,7 @@
         var unitRadian = Math.PI / (sum || validDataCount) * 2;
         var clockwise = seriesModel.get('clockwise');
         var roseType = seriesModel.get('roseType');
+        var radiusPercent = seriesModel.get(['itemStyle', 'radiusPercent']);
         var stillShowZeroSum = seriesModel.get('stillShowZeroSum'); // [0...max]
 
         var extent = data.getDataExtent(valueDim);
@@ -41574,6 +41592,26 @@
           }
 
           var endAngle = currentAngle + dir * angle;
+          var outerRadius = r;
+
+          if (radiusPercent != null) {
+            var scale = 0;
+
+            if (isFunction(radiusPercent)) {
+              // calculate the radius of the current pie item based on the scale from the user-defined function
+              scale = radiusPercent(seriesModel.getDataParams(idx)) || 0;
+            } else if (isNumber(radiusPercent)) {
+              scale = radiusPercent;
+            } // scale should always be between 0 and 1
+
+
+            scale = Math.max(0, Math.min(scale, 1)); // r0 is used here to scale radius properly in case of 'donut' style.
+
+            outerRadius = (r - r0) * scale + r0;
+          } else if (roseType) {
+            outerRadius = linearMap(value, extent, [r0, r]);
+          }
+
           data.setItemLayout(idx, {
             angle: angle,
             startAngle: currentAngle,
@@ -41582,7 +41620,7 @@
             cx: cx,
             cy: cy,
             r0: r0,
-            r: roseType ? linearMap(value, extent, [r0, r]) : r
+            r: outerRadius
           });
           currentAngle = endAngle;
         }); // Some sector is constrained by minAngle
@@ -42363,6 +42401,7 @@
         var _this = _super !== null && _super.apply(this, arguments) || this;
 
         _this.ignoreLabelLineUpdate = true;
+        _this._backgroundEls = [];
         return _this;
       }
 
@@ -42399,20 +42438,71 @@
           group.add(sector);
         }
 
+        var animationModel = seriesModel.isAnimationEnabled() ? seriesModel : null;
+        var drawBackground = seriesModel.get('showBackground', true);
+        var basicOuterRadius = getBasicPieLayout(seriesModel, api).r;
+        var bgStyle = seriesModel.getModel('backgroundStyle').getItemStyle();
+        var bgEls = [];
+        var existBgEls = this._backgroundEls;
+
+        function createBackground(idx) {
+          var bgEl = new Sector({
+            shape: data.getItemLayout(idx),
+            silent: true,
+            z2: 0
+          });
+          bgEl.setShape('r', basicOuterRadius);
+          var style = data.getItemVisual(idx, 'style');
+          var visualColor = style && style.fill;
+          bgEl.useStyle(extend( // inherit item color if no background color specified
+          {
+            fill: visualColor
+          }, bgStyle));
+          return bgEl;
+        }
+
         data.diff(oldData).add(function (idx) {
           var piePiece = new PiePiece(data, idx, startAngle);
           data.setItemGraphicEl(idx, piePiece);
+
+          if (drawBackground) {
+            bgEls[idx] = createBackground(idx);
+          }
+
           group.add(piePiece);
         }).update(function (newIdx, oldIdx) {
           var piePiece = oldData.getItemGraphicEl(oldIdx);
           piePiece.updateData(data, newIdx, startAngle);
           piePiece.off('click');
+
+          if (drawBackground) {
+            bgEls[newIdx] = existBgEls[oldIdx] || createBackground(newIdx);
+            var shape = defaults({
+              r: basicOuterRadius
+            }, data.getItemLayout(newIdx));
+            updateProps(bgEls[newIdx], {
+              shape: shape
+            }, animationModel, newIdx);
+          }
+
           group.add(piePiece);
           data.setItemGraphicEl(newIdx, piePiece);
         }).remove(function (idx) {
           var piePiece = oldData.getItemGraphicEl(idx);
           removeElementWithFadeOut(piePiece, seriesModel, idx);
         }).execute();
+        this._backgroundGroup || (this._backgroundGroup = new Group());
+
+        this._backgroundGroup.removeAll();
+
+        for (var _i = 0, bgEls_1 = bgEls; _i < bgEls_1.length; _i++) {
+          var bgEl = bgEls_1[_i];
+
+          this._backgroundGroup.add(bgEl);
+        }
+
+        group.add(this._backgroundGroup);
+        this._backgroundEls = bgEls;
         pieLabelLayout(seriesModel); // Always use initial animation.
 
         if (seriesModel.get('animationTypeUpdate') !== 'expansion') {
@@ -42601,14 +42691,15 @@
 
 
       PieSeriesModel.prototype.getDataParams = function (dataIndex) {
-        var data = this.getData(); // update seats when data is changed
+        var data = this.getData();
+        var valueDim = data.mapDimension('value'); // update seats when data is changed
 
         var dataInner = innerData(data);
         var seats = dataInner.seats;
 
         if (!seats) {
           var valueList_1 = [];
-          data.each(data.mapDimension('value'), function (value) {
+          data.each(valueDim, function (value) {
             valueList_1.push(value);
           });
           seats = dataInner.seats = getPercentSeats(valueList_1, data.hostModel.get('percentPrecision'));
@@ -42619,6 +42710,14 @@
 
         params.percent = seats[dataIndex] || 0;
         params.$vars.push('percent');
+        var radiusPercent = data.hostModel.get(['itemStyle', 'radiusPercent']);
+
+        if (radiusPercent != null) {
+          // useful variables for custom percentage calculations in formatters etc.
+          params.max = data.getDataExtent(valueDim)[1];
+          params.sum = data.getSum(valueDim);
+        }
+
         return params;
       };
 
@@ -42709,6 +42808,10 @@
         showEmptyCircle: true,
         emptyCircleStyle: {
           color: 'lightgray',
+          opacity: 1
+        },
+        showBackground: false,
+        backgroundStyle: {
           opacity: 1
         },
         labelLayout: {
