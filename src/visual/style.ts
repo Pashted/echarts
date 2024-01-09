@@ -91,7 +91,7 @@ const seriesStyleTask: StageHandler = {
         const colorCallback = isFunction(color) ? color as unknown as ColorCallback : null;
         const hasAutoColor = globalStyle.fill === 'auto' || globalStyle.stroke === 'auto';
         // Get from color palette by default.
-        if (!globalStyle[colorKey] || colorCallback || hasAutoColor) {
+        if (!globalStyle[colorKey] || (colorCallback && seriesModel.isColorBySeries()) || hasAutoColor) {
             // Note: If some series has color specified (e.g., by itemStyle.color), we DO NOT
             // make it effect palette. Because some scenarios users need to make some series
             // transparent or as background, which should better not effect the palette.
@@ -118,9 +118,24 @@ const seriesStyleTask: StageHandler = {
         if (!ecModel.isSeriesFiltered(seriesModel) && colorCallback) {
             data.setVisual('colorFromPalette', false);
 
+            const defaultDataColor: Dictionary<ZRColor> = {};
+
+            if (!seriesModel.isColorBySeries() && colorKey === 'fill') {
+                const colorScope = inner(seriesModel).scope;
+                const dataAll = seriesModel.getRawData();
+                dataAll.each(function (rawIdx) {
+                    const name = dataAll.getName(rawIdx) || (rawIdx + '');
+                    defaultDataColor[rawIdx] = seriesModel.getColorFromPalette(name, colorScope, dataAll.count());
+                });
+            }
+
             return {
                 dataEach(data, idx) {
                     const dataParams = seriesModel.getDataParams(idx);
+                    const rawIdx = data.getRawIndex(idx);
+                    if (defaultDataColor[rawIdx]) {
+                        dataParams.color = defaultDataColor[rawIdx];
+                    }
                     const itemStyle = extend({}, globalStyle);
                     itemStyle[colorKey] = colorCallback(dataParams);
                     data.setItemVisual(idx, 'style', itemStyle);

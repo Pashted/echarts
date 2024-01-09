@@ -212,6 +212,12 @@ under the License.
                 },
                 itemStyle: {
                     radiusPercent: radiusPercent,
+                    color: function(params) {
+                        if (params.dataIndex === 1) {
+                            return '#333';
+                        }
+                        return params.color;
+                    },
                 },
                 showBackground: bg != null,
                 backgroundStyle: bg,
